@@ -668,7 +668,7 @@ def log_probability(distributions, actions, action_spec):
         input_tensor=single_log_prob,
         axis=reduce_dims)
 
-  tf.nest.assert_same_structure(distributions, actions)
+  nest_utils.assert_same_structure(distributions, actions)
   log_probs = [
       _compute_log_prob(dist, action)
       for (dist, action
@@ -985,6 +985,11 @@ class Checkpointer(object):
   @property
   def checkpoint_exists(self):
     return self._checkpoint_exists
+
+  @property
+  def manager(self):
+    """Returns the underlying tf.train.CheckpointManager."""
+    return self._manager
 
   def initialize_or_restore(self, session=None):
     """Initialize or restore graph (based on checkpoint if exists)."""
@@ -1353,3 +1358,15 @@ def soft_device_placement():
     yield
   finally:
     tf.config.set_soft_device_placement(original_setting)
+
+
+def deduped_network_variables(network, *args):
+  """Returns a list of variables in net1 that are not in any other nets.
+
+  Args:
+    network: A Keras network.
+    *args: other networks to check for duplicate variables.
+  """
+  other_vars = object_identity.ObjectIdentitySet(
+      [v for n in args for v in n.variables])  # pylint:disable=g-complex-comprehension
+  return [v for v in network.variables if v not in other_vars]

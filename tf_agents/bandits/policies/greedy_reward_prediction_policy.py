@@ -32,7 +32,7 @@ from tf_agents.trajectories import policy_step
 
 
 @gin.configurable
-class GreedyRewardPredictionPolicy(tf_policy.Base):
+class GreedyRewardPredictionPolicy(tf_policy.TFPolicy):
   """Class to build GreedyNNPredictionPolicies."""
 
   def __init__(self,
@@ -41,6 +41,7 @@ class GreedyRewardPredictionPolicy(tf_policy.Base):
                reward_network=None,
                observation_and_action_constraint_splitter=None,
                accepts_per_arm_features=False,
+               constraints=(),
                emit_policy_info=(),
                name=None):
     """Builds a GreedyRewardPredictionPolicy given a reward tf_agents.Network.
@@ -63,6 +64,8 @@ class GreedyRewardPredictionPolicy(tf_policy.Base):
         observation and mask.
       accepts_per_arm_features: (bool) Whether the policy accepts per-arm
         features.
+      constraints: iterable of constraints objects that are instances of
+        `tf_agents.bandits.agents.NeuralConstraint`.
       emit_policy_info: (tuple of strings) what side information we want to get
         as part of the policy info. Allowed values can be found in
         `policy_utilities.PolicyInfo`.
@@ -90,6 +93,7 @@ class GreedyRewardPredictionPolicy(tf_policy.Base):
     self._action_offset = action_spec.minimum
     reward_network.create_variables()
     self._reward_network = reward_network
+    self._constraints = constraints
 
     self._emit_policy_info = emit_policy_info
     predicted_rewards_mean = ()
@@ -102,12 +106,10 @@ class GreedyRewardPredictionPolicy(tf_policy.Base):
           policy_utilities.create_bandit_policy_type_tensor_spec(shape=[1]))
     if accepts_per_arm_features:
       # The features for the chosen arm is saved to policy_info.
-      arm_spec = time_step_spec.observation[
-          bandit_spec_utils.PER_ARM_FEATURE_KEY]
-      chosen_arm_features_info = tensor_spec.TensorSpec(
-          dtype=arm_spec.dtype,
-          shape=arm_spec.shape[1:],
-          name='chosen_arm_features')
+      chosen_arm_features_info = (
+          policy_utilities.create_chosen_arm_features_info_spec(
+              time_step_spec.observation,
+              observation_and_action_constraint_splitter))
       info_spec = policy_utilities.PerArmPolicyInfo(
           predicted_rewards_mean=predicted_rewards_mean,
           bandit_policy_type=bandit_policy_type,
@@ -124,6 +126,7 @@ class GreedyRewardPredictionPolicy(tf_policy.Base):
         policy_state_spec=reward_network.state_spec,
         clip=False,
         info_spec=info_spec,
+        emit_log_probability='log_probability' in emit_policy_info,
         observation_and_action_constraint_splitter=(
             observation_and_action_constraint_splitter),
         name=name)
@@ -133,14 +136,15 @@ class GreedyRewardPredictionPolicy(tf_policy.Base):
     return self._accepts_per_arm_features
 
   def _variables(self):
-    return self._reward_network.variables
+    policy_variables = self._reward_network.variables
+    for c in self._constraints:
+      policy_variables.append(c.variables)
+    return policy_variables
 
   def _distribution(self, time_step, policy_state):
     observation = time_step.observation
-    observation_and_action_constraint_splitter = (
-        self.observation_and_action_constraint_splitter)
-    if observation_and_action_constraint_splitter is not None:
-      observation, mask = observation_and_action_constraint_splitter(
+    if self.observation_and_action_constraint_splitter is not None:
+      observation, _ = self.observation_and_action_constraint_splitter(
           observation)
 
     predictions, policy_state = self._reward_network(
@@ -155,17 +159,26 @@ class GreedyRewardPredictionPolicy(tf_policy.Base):
 
     predicted_reward_values.shape.with_rank_at_least(2)
     predicted_reward_values.shape.with_rank_at_most(3)
-    if predicted_reward_values.shape[-1] != self._expected_num_actions:
+    if predicted_reward_values.shape[
+        -1] is not None and predicted_reward_values.shape[
+            -1] != self._expected_num_actions:
       raise ValueError(
           'The number of actions ({}) does not match the reward_network output'
           ' size ({}).'.format(self._expected_num_actions,
                                predicted_reward_values.shape[1]))
-    if observation_and_action_constraint_splitter is not None:
+
+    mask = policy_utilities.construct_mask_from_multiple_sources(
+        time_step.observation, self._observation_and_action_constraint_splitter,
+        self._constraints, self._expected_num_actions)
+
+    # Argmax.
+    if mask is not None:
       actions = policy_utilities.masked_argmax(
           predicted_reward_values, mask, output_type=self.action_spec.dtype)
     else:
       actions = tf.argmax(
           predicted_reward_values, axis=-1, output_type=self.action_spec.dtype)
+
     actions += self._action_offset
 
     bandit_policy_values = tf.fill([batch_size, 1],
@@ -173,11 +186,16 @@ class GreedyRewardPredictionPolicy(tf_policy.Base):
 
     if self._accepts_per_arm_features:
       # Saving the features for the chosen action to the policy_info.
-      chosen_arm_features = tf.gather(
-          params=observation[bandit_spec_utils.PER_ARM_FEATURE_KEY],
-          indices=actions,
-          batch_dims=1)
+      def gather_observation(obs):
+        return tf.gather(params=obs, indices=actions, batch_dims=1)
+
+      chosen_arm_features = tf.nest.map_structure(
+          gather_observation,
+          observation[bandit_spec_utils.PER_ARM_FEATURE_KEY])
       policy_info = policy_utilities.PerArmPolicyInfo(
+          log_probability=tf.zeros([batch_size], tf.float32) if
+          policy_utilities.InfoFields.LOG_PROBABILITY in self._emit_policy_info
+          else (),
           predicted_rewards_mean=(
               predicted_reward_values if policy_utilities.InfoFields
               .PREDICTED_REWARDS_MEAN in self._emit_policy_info else ()),
@@ -187,6 +205,9 @@ class GreedyRewardPredictionPolicy(tf_policy.Base):
           chosen_arm_features=chosen_arm_features)
     else:
       policy_info = policy_utilities.PolicyInfo(
+          log_probability=tf.zeros([batch_size], tf.float32) if
+          policy_utilities.InfoFields.LOG_PROBABILITY in self._emit_policy_info
+          else (),
           predicted_rewards_mean=(
               predicted_reward_values if policy_utilities.InfoFields
               .PREDICTED_REWARDS_MEAN in self._emit_policy_info else ()),

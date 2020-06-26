@@ -57,6 +57,7 @@ class PyEnvironmentMock(py_environment.PyEnvironment):
                                                name='action')
     self._observation_spec = specs.ArraySpec([], np.int32, name='observation')
     self._final_state = final_state
+    super(PyEnvironmentMock, self).__init__()
 
   @property
   def batched(self):
@@ -70,11 +71,12 @@ class PyEnvironmentMock(py_environment.PyEnvironment):
     if action < self._action_spec.minimum or action > self._action_spec.maximum:
       raise ValueError('Action should be in [{0}, {1}], but saw: {2}'.format(
           self._action_spec.minimum, self._action_spec.maximum, action))
+    if action.shape != ():  # pylint: disable=g-explicit-bool-comparison
+      raise ValueError('Action should be a scalar.')
 
     if self._state >= self._final_state:
       # Start a new episode. Ignore action
-      self._state = np.int32(0)
-      return ts.restart(self._state)
+      return self.reset()
 
     self._state += action
     self._state = np.int32(self._state)
@@ -90,7 +92,7 @@ class PyEnvironmentMock(py_environment.PyEnvironment):
     return self._observation_spec
 
 
-class TFPolicyMock(tf_policy.Base):
+class TFPolicyMock(tf_policy.TFPolicy):
   """Mock policy takes actions 1 and 2, alternating."""
 
   def __init__(self,
@@ -149,7 +151,7 @@ class TFPolicyMock(tf_policy.Base):
     return ()
 
 
-class PyPolicyMock(py_policy.Base):
+class PyPolicyMock(py_policy.PyPolicy):
   """Mock policy takes actions 1 and 2, alternating."""
 
   # For batched environments, use a initial policy state of size [batch_size].
@@ -186,8 +188,10 @@ class PyPolicyMock(py_policy.Base):
 
     # Take actions 1 and 2 alternating.
     action = (policy_state % 2) + 1
-    policy_info = action * 2
-    return policy_step.PolicyStep(action, policy_state + 1, policy_info)
+    policy_info = np.int32(action * 2)
+    action = np.int32(action)
+    policy_state = np.int32(policy_state + 1)
+    return policy_step.PolicyStep(action, policy_state, policy_info)
 
 
 class NumStepsObserver(object):

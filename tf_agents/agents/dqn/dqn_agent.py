@@ -24,22 +24,27 @@ Implements the DQN algorithm from
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
 import collections
+from typing import Optional, Text
 
 import gin
 import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.agents import tf_agent
+from tf_agents.networks import network
+from tf_agents.networks import utils as network_utils
 from tf_agents.policies import boltzmann_policy
 from tf_agents.policies import epsilon_greedy_policy
 from tf_agents.policies import greedy_policy
 from tf_agents.policies import q_policy
+from tf_agents.trajectories import time_step as ts
 from tf_agents.trajectories import trajectory
+from tf_agents.typing import types
 from tf_agents.utils import common
 from tf_agents.utils import eager_utils
 from tf_agents.utils import nest_utils
-from tf_agents.utils import training as training_lib
 from tf_agents.utils import value_ops
 
 
@@ -66,7 +71,9 @@ class DqnLossInfo(collections.namedtuple('DqnLossInfo',
   pass
 
 
-def compute_td_targets(next_q_values, rewards, discounts):
+def compute_td_targets(next_q_values: types.Tensor,
+                       rewards: types.Tensor,
+                       discounts: types.Tensor) -> types.Tensor:
   return tf.stop_gradient(rewards + discounts * next_q_values)
 
 
@@ -87,29 +94,30 @@ class DqnAgent(tf_agent.TFAgent):
 
   def __init__(
       self,
-      time_step_spec,
-      action_spec,
-      q_network,
-      optimizer,
-      observation_and_action_constraint_splitter=None,
-      epsilon_greedy=0.1,
-      n_step_update=1,
-      boltzmann_temperature=None,
-      emit_log_probability=False,
+      time_step_spec: ts.TimeStep,
+      action_spec: types.NestedTensorSpec,
+      q_network: network.Network,
+      optimizer: types.Optimizer,
+      observation_and_action_constraint_splitter: Optional[
+          types.Splitter] = None,
+      epsilon_greedy: types.Float = 0.1,
+      n_step_update: int = 1,
+      boltzmann_temperature: Optional[types.Int] = None,
+      emit_log_probability: bool = False,
       # Params for target network updates
-      target_q_network=None,
-      target_update_tau=1.0,
-      target_update_period=1,
+      target_q_network: Optional[network.Network] = None,
+      target_update_tau: types.Float = 1.0,
+      target_update_period: int = 1,
       # Params for training.
-      td_errors_loss_fn=None,
-      gamma=1.0,
-      reward_scale_factor=1.0,
-      gradient_clipping=None,
+      td_errors_loss_fn: Optional[types.LossFn] = None,
+      gamma: types.Float = 1.0,
+      reward_scale_factor: types.Float = 1.0,
+      gradient_clipping: Optional[types.Float] = None,
       # Params for debugging
-      debug_summaries=False,
-      summarize_grads_and_vars=False,
-      train_step_counter=None,
-      name=None):
+      debug_summaries: bool = False,
+      summarize_grads_and_vars: bool = False,
+      train_step_counter: Optional[tf.Variable] = None,
+      name: Optional[Text] = None):
     """Creates a DQN Agent.
 
     Args:
@@ -197,8 +205,10 @@ class DqnAgent(tf_agent.TFAgent):
         under that name. Defaults to the class name.
 
     Raises:
-      ValueError: If the action spec contains more than one action or action
+      ValueError: If `action_spec` contains more than one action or action
         spec minimum is not equal to 0.
+      ValueError: If the q networks do not emit floating point outputs with
+        inner shape matching `action_spec`.
       NotImplementedError: If `q_network` has non-empty `state_spec` (i.e., an
         RNN is provided) and `n_step_update > 1`.
     """
@@ -220,6 +230,9 @@ class DqnAgent(tf_agent.TFAgent):
       target_q_network.create_variables()
     self._target_q_network = common.maybe_copy_target_network_with_checks(
         self._q_network, target_q_network, 'TargetQNetwork')
+
+    self._check_network_output(self._q_network, 'q_network')
+    self._check_network_output(self._target_q_network, 'target_q_network')
 
     self._epsilon_greedy = epsilon_greedy
     self._n_step_update = n_step_update
@@ -257,20 +270,37 @@ class DqnAgent(tf_agent.TFAgent):
 
   def _check_action_spec(self, action_spec):
     flat_action_spec = tf.nest.flatten(action_spec)
-    self._num_actions = [
-        spec.maximum - spec.minimum + 1 for spec in flat_action_spec
-    ]
 
     # TODO(oars): Get DQN working with more than one dim in the actions.
-    if len(flat_action_spec) > 1 or flat_action_spec[0].shape.rank > 1:
-      raise ValueError('Only one dimensional actions are supported now.')
+    if len(flat_action_spec) > 1 or flat_action_spec[0].shape.rank > 0:
+      raise ValueError(
+          'Only scalar actions are supported now, but action spec is: {}'
+          .format(action_spec))
+
+    spec = flat_action_spec[0]
 
     # TODO(b/119321125): Disable this once index_with_actions supports
     # negative-valued actions.
-    if not all(spec.minimum == 0 for spec in flat_action_spec):
+    if spec.minimum != 0:
       raise ValueError(
-          'Action specs should have minimum of 0, but saw: {0}'.format(
-              [spec.minimum for spec in flat_action_spec]))
+          'Action specs should have minimum of 0, but saw: {0}'.format(spec))
+
+    self._num_actions = spec.maximum - spec.minimum + 1
+
+  def _check_network_output(self, net, label):
+    """Check outputs of q_net and target_q_net against expected shape.
+
+    Subclasses that require different q_network outputs should override
+    this function.
+
+    Args:
+      net: A `Network`.
+      label: A label to print in case of a mismatch.
+    """
+    network_utils.check_single_floating_network_output(
+        net.create_variables(),
+        expected_output_shape=(self._num_actions,),
+        label=label)
 
   def _setup_policy(self, time_step_spec, action_spec,
                     boltzmann_temperature, emit_log_probability):
@@ -359,8 +389,8 @@ class DqnAgent(tf_agent.TFAgent):
                                           self.train_step_counter)
       eager_utils.add_gradients_summaries(grads_and_vars,
                                           self.train_step_counter)
-    training_lib.apply_gradients(
-        self._optimizer, grads_and_vars, global_step=self.train_step_counter)
+    self._optimizer.apply_gradients(grads_and_vars)
+    self.train_step_counter.assign_add(1)
 
     self._update_target()
 

@@ -17,43 +17,55 @@
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
 import numpy as np
 import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.drivers import driver
+from tf_agents.environments import tf_environment
+from tf_agents.policies import tf_policy
+from tf_agents.trajectories import time_step as ts
 from tf_agents.trajectories import trajectory
+from tf_agents.typing import types
 from tf_agents.utils import common
+
+from typing import Any, Callable, Optional, Sequence, Tuple
 
 
 class TFDriver(driver.Driver):
   """A driver that runs a TF policy in a TF environment."""
 
-  def __init__(self,
-               env,
-               policy,
-               observers,
-               transition_observers=None,
-               max_steps=None,
-               max_episodes=None,
-               disable_tf_function=False):
+  def __init__(
+      self,
+      env: tf_environment.TFEnvironment,
+      policy: tf_policy.TFPolicy,
+      observers: Sequence[Callable[[trajectory.Trajectory], Any]],
+      transition_observers: Optional[Sequence[Callable[[types.Transition],
+                                                       Any]]] = None,
+      max_steps: Optional[types.Int] = None,
+      max_episodes: Optional[types.Int] = None,
+      disable_tf_function: bool = False):
     """A driver that runs a TF policy in a TF environment.
 
     Args:
       env: A tf_environment.Base environment.
-      policy: A tf_policy.Base policy.
+      policy: A tf_policy.TFPolicy policy.
       observers: A list of observers that are notified after every step
         in the environment. Each observer is a callable(trajectory.Trajectory).
       transition_observers: A list of observers that are updated after every
         step in the environment. Each observer is a callable((TimeStep,
         PolicyStep, NextTimeStep)). The transition is shaped just as
         trajectories are for regular observers.
-      max_steps: Optional maximum number of steps for each run() call.
-        Also see below.  Default: 0.
-      max_episodes: Optional maximum number of episodes for each run() call.
-        At least one of max_steps or max_episodes must be provided. If both
-        are set, run() terminates when at least one of the conditions is
+      max_steps: Optional maximum number of steps for each run() call. For
+        batched or parallel environments, this is the maximum total number of
+        steps summed across all environments. Also see below.  Default: 0.
+      max_episodes: Optional maximum number of episodes for each run() call. For
+        batched or parallel environments, this is the maximum total number of
+        episodes summed across all environments. At least one of max_steps or
+        max_episodes must be provided. If both are set, run() terminates when at
+        least one of the conditions is
         satisfied.  Default: 0.
       disable_tf_function: If True the use of tf.function for the run method is
         disabled.
@@ -76,7 +88,10 @@ class TFDriver(driver.Driver):
     if not disable_tf_function:
       self.run = common.function(self.run, autograph=True)
 
-  def run(self, time_step, policy_state=()):
+  def run(
+      self, time_step: ts.TimeStep,
+      policy_state: types.NestedTensor = ()
+  ) -> Tuple[ts.TimeStep, types.NestedTensor]:
     """Run policy in environment given initial time_step and policy_state.
 
     Args:

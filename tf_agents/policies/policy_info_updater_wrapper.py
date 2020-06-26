@@ -19,24 +19,29 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-from typing import Callable, Text, Dict, Union, Sequence
+
+from typing import Callable, Text, Dict, Union, Sequence, Optional
+
 import tensorflow.compat.v2 as tf
 from tf_agents.policies import tf_policy
 from tf_agents.trajectories import policy_step
+from tf_agents.typing import types
+
+# A callable that receives a `PolicyStep` and returns a dictionary of a
+# tf.Tensor or a sequence of tf.Tensor`s used to update the policy_info.
+UpdaterFnType = Callable[[policy_step.PolicyStep],
+                         Dict[Text, Union[tf.Tensor, Sequence[tf.Tensor]]]]
 
 
-class PolicyInfoUpdaterWrapper(tf_policy.Base):
+class PolicyInfoUpdaterWrapper(tf_policy.TFPolicy):
   """Returns samples with updated `policy_info` (a dictionary).
   """
 
   def __init__(self,
-               policy: tf_policy.Base,
-               info_spec: Dict[Text, Union[tf.TensorSpec,
-                                           Sequence[tf.TensorSpec]]],
-               updater_fn: Callable[[policy_step.PolicyStep],
-                                    Dict[Text, Union[tf.Tensor,
-                                                     Sequence[tf.Tensor]]]],
-               name: Text = None):
+               policy: tf_policy.TFPolicy,
+               info_spec: types.NestedTensorSpec,
+               updater_fn: UpdaterFnType,
+               name: Optional[Text] = None):
     """Builds a TFPolicy wrapping the given policy.
 
     PolicyInfoUpdaterWrapper class updates `policy_info` using a user-defined
@@ -45,12 +50,17 @@ class PolicyInfoUpdaterWrapper(tf_policy.Base):
     an identifier to specify which model is used for current rollout.
 
     Args:
-      policy: A policy implementing the tf_policy.Base interface.
+      policy: A policy implementing the tf_policy.TFPolicy interface.
       info_spec: User-defined `info_spec` which specifies the policy info after
         applying the updater function.
       updater_fn: An updater function that updates the `policy_info`. This is a
         callable that receives a `PolicyStep` and will return a dictionary of a
         tf.Tensor or sequence of tf.Tensor`s.
+
+        **NOTE** If `policy.distribution` is called, the `PolicyStep.action`
+        object may contain a `tfp.distributions.Distribution` object instead
+        of a `Tensor`.  The `updater_fn` must be able to handle both cases
+        to be compatible with `PolicySaver`.
       name: The name of this policy. All variables in this module will fall
         under that name. Defaults to the class name.
     """

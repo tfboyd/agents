@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for tf_agents.networks.bias_layer."""
+"""Tests for tf_agents.keras_layers.bias_layer."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -22,7 +22,7 @@ from __future__ import print_function
 import numpy as np
 import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
-from tf_agents.networks import bias_layer
+from tf_agents.keras_layers import bias_layer
 
 
 class BiasLayerTest(tf.test.TestCase):
@@ -33,6 +33,13 @@ class BiasLayerTest(tf.test.TestCase):
     out = bias(states)
     self.evaluate(tf.compat.v1.global_variables_initializer())
     np.testing.assert_almost_equal([[1.0] * 3] * 2, self.evaluate(out))
+
+  def testBuildScalar(self):
+    bias = bias_layer.BiasLayer()
+    states = tf.ones((2,))
+    out = bias(states)
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+    np.testing.assert_almost_equal([1.0] * 2, self.evaluate(out))
 
   def testTrainableVariables(self):
     bias = bias_layer.BiasLayer(

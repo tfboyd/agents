@@ -52,44 +52,57 @@ https://arxiv.org/abs/1506.02438
 """
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
+from typing import Optional, Text
+
 import gin
+import tensorflow as tf
 
 from tf_agents.agents.ppo import ppo_agent
+from tf_agents.networks import network
+from tf_agents.trajectories import time_step as ts
+from tf_agents.typing import types
 
 
 @gin.configurable
 class PPOClipAgent(ppo_agent.PPOAgent):
   """A PPO Agent implementing the clipped probability ratios."""
 
-  def __init__(self,
-               time_step_spec,
-               action_spec,
-               optimizer=None,
-               actor_net=None,
-               value_net=None,
-               importance_ratio_clipping=0.0,
-               lambda_value=0.95,
-               discount_factor=0.99,
-               entropy_regularization=0.0,
-               policy_l2_reg=0.0,
-               value_function_l2_reg=0.0,
-               shared_vars_l2_reg=0.0,
-               value_pred_loss_coef=0.5,
-               num_epochs=25,
-               use_gae=False,
-               use_td_lambda_return=False,
-               normalize_rewards=True,
-               reward_norm_clipping=10.0,
-               normalize_observations=True,
-               log_prob_clipping=0.0,
-               gradient_clipping=None,
-               check_numerics=False,
-               debug_summaries=False,
-               summarize_grads_and_vars=False,
-               train_step_counter=None,
-               name='PPOClipAgent'):
+  def __init__(
+      self,
+      time_step_spec: ts.TimeStep,
+      action_spec: types.NestedTensorSpec,
+      optimizer: Optional[types.Optimizer] = None,
+      actor_net: Optional[network.Network] = None,
+      value_net: Optional[network.Network] = None,
+      importance_ratio_clipping: types.Float = 0.0,
+      lambda_value: types.Float = 0.95,
+      discount_factor: types.Float = 0.99,
+      entropy_regularization: types.Float = 0.0,
+      policy_l2_reg: types.Float = 0.0,
+      value_function_l2_reg: types.Float = 0.0,
+      shared_vars_l2_reg: types.Float = 0.0,
+      value_pred_loss_coef: types.Float = 0.5,
+      num_epochs: int = 25,
+      use_gae: bool = False,
+      use_td_lambda_return: bool = False,
+      normalize_rewards: bool = True,
+      reward_norm_clipping: types.Float = 10.0,
+      normalize_observations: bool = True,
+      log_prob_clipping: types.Float = 0.0,
+      gradient_clipping: Optional[types.Float] = None,
+      value_clipping: Optional[types.Float] = None,
+      check_numerics: bool = False,
+      # TODO(b/150244758): Change the default to False once we move
+      # clients onto Reverb.
+      compute_value_and_advantage_in_train: bool = True,
+      update_normalizers_in_train: bool = True,
+      debug_summaries: bool = False,
+      summarize_grads_and_vars: bool = False,
+      train_step_counter: Optional[tf.Variable] = None,
+      name: Optional[Text] = 'PPOClipAgent'):
     """Creates a PPO Agent implementing the clipped probability ratios.
 
     Args:
@@ -130,8 +143,23 @@ class PPOClipAgent(ppo_agent.PPOAgent):
       log_prob_clipping: +/- value for clipping log probs to prevent inf / NaN
         values.  Default: no clipping.
       gradient_clipping: Norm length to clip gradients.  Default: no clipping.
+      value_clipping: Difference between new and old value predictions are
+        clipped to this threshold. Value clipping could be helpful when training
+        very deep networks. Default: no clipping.
       check_numerics: If true, adds tf.debugging.check_numerics to help find NaN
         / Inf values. For debugging only.
+      compute_value_and_advantage_in_train: A bool to indicate where value
+        prediction and advantage calculation happen.  If True, both happen in
+        agent.train(). If False, value prediction is computed during data
+        collection. This argument must be set to `False` if mini batch learning
+        is enabled.
+      update_normalizers_in_train: A bool to indicate whether normalizers are
+        updated at the end of the `train` method. Set to `False` if mini batch
+        learning is enabled, or if `train` is called on multiple iterations of
+        the same trajectories. In that case, you would need to call the
+        `update_reward_normalizer` and `update_observation_normalizer` methods
+        after all iterations of the same trajectory are done. This ensures that
+        normalizers are updated in the same way as (Schulman, 2017).
       debug_summaries: A bool to gather debug summaries.
       summarize_grads_and_vars: If true, gradient summaries will be written.
       train_step_counter: An optional counter to increment every time the train
@@ -163,7 +191,10 @@ class PPOClipAgent(ppo_agent.PPOAgent):
         reward_norm_clipping,
         normalize_observations,
         gradient_clipping=gradient_clipping,
+        value_clipping=value_clipping,
         check_numerics=check_numerics,
+        compute_value_and_advantage_in_train=compute_value_and_advantage_in_train,
+        update_normalizers_in_train=update_normalizers_in_train,
         debug_summaries=debug_summaries,
         summarize_grads_and_vars=summarize_grads_and_vars,
         train_step_counter=train_step_counter,

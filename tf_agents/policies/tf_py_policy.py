@@ -17,8 +17,10 @@
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
+from typing import Optional, Text
 import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.policies import py_policy
@@ -32,18 +34,21 @@ def map_tensor_spec_to_dtypes_list(t_spec):
   return [spec.dtype for spec in tf.nest.flatten(t_spec)]
 
 
-class TFPyPolicy(tf_policy.Base):
+class TFPyPolicy(tf_policy.TFPolicy):
   """Exposes a Python policy as an in-graph TensorFlow policy.
 
   # TODO(kbanoop): This class does not seem to handle batching/unbatching when
   # converting between TF and Py policies.
   """
 
-  def __init__(self, policy, py_policy_is_batched=False, name=None):
+  def __init__(self,
+               policy: py_policy.PyPolicy,
+               py_policy_is_batched: bool = False,
+               name: Optional[Text] = None):
     """Initializes a new `TFPyPolicy` instance with an Pyton policy .
 
     Args:
-      policy: Python policy implementing `py_policy.Base`.
+      policy: Python policy implementing `py_policy.PyPolicy`.
       py_policy_is_batched: If False, time_steps will be unbatched before
         passing to py_policy.action(), and a batch dimension will be added to
         the returned action. This will only work with time_steps that have a
@@ -55,9 +60,9 @@ class TFPyPolicy(tf_policy.Base):
     Raises:
       TypeError: if a non python policy is passed to constructor.
     """
-    if not isinstance(policy, py_policy.Base):
+    if not isinstance(policy, py_policy.PyPolicy):
       raise TypeError(
-          'Input policy should implement py_policy.Base, but saw %s.' %
+          'Input policy should implement py_policy.PyPolicy, but saw %s.' %
           type(policy).__name__)
 
     self._py_policy = policy
@@ -65,7 +70,7 @@ class TFPyPolicy(tf_policy.Base):
 
     (time_step_spec, action_spec,
      policy_state_spec, info_spec) = tf.nest.map_structure(
-         tensor_spec.BoundedTensorSpec.from_spec,
+         tensor_spec.from_spec,
          (policy.time_step_spec, policy.action_spec, policy.policy_state_spec,
           policy.info_spec))
 
@@ -152,7 +157,6 @@ class TFPyPolicy(tf_policy.Base):
     """Returns default [] representing a policy that has no variables."""
     return []
 
-  # TODO(kewa): revisit when py_policy.Base supports distribution.
   def _distribution(self, time_step, policy_state):
     raise NotImplementedError('%s does not support distribution yet.' %
                               self.__class__.__name__)

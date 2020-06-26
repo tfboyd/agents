@@ -56,6 +56,7 @@ from tf_agents.networks import value_network
 from tf_agents.networks import value_rnn_network
 from tf_agents.policies import py_tf_policy
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
+from tf_agents.system import system_multiprocessing as multiprocessing
 from tf_agents.utils import common
 
 
@@ -157,6 +158,7 @@ def train_eval(
           tf_env.observation_spec(),
           tf_env.action_spec(),
           input_fc_layer_params=actor_fc_layers,
+          lstm_size=(40,),
           output_fc_layer_params=None)
       value_net = value_rnn_network.ValueRnnNetwork(
           tf_env.observation_spec(),
@@ -348,4 +350,4 @@ def main(_):
 
 if __name__ == '__main__':
   flags.mark_flag_as_required('root_dir')
-  app.run(main)
+  multiprocessing.handle_main(lambda _: app.run(main))

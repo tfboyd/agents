@@ -21,14 +21,18 @@ Adapted from the Deepmind's Environment API as seen in:
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
 import abc
+from typing import Any, Optional, Text
+
 import numpy as np
 import six
 
 from tf_agents.specs import array_spec
 from tf_agents.trajectories import time_step as ts
+from tf_agents.typing import types
 from tf_agents.utils import common
 
 
@@ -50,7 +54,7 @@ class PyEnvironment(object):
         base_cls=PyEnvironment, instance=self, black_list=('reset', 'step'))
 
   @property
-  def batched(self):
+  def batched(self) -> bool:
     """Whether the environment is batched or not.
 
     If the environment supports batched observations and actions, then overwrite
@@ -69,7 +73,7 @@ class PyEnvironment(object):
     return False
 
   @property
-  def batch_size(self):
+  def batch_size(self) -> Optional[int]:
     """The batch size of the environment.
 
     Returns:
@@ -87,7 +91,7 @@ class PyEnvironment(object):
     return None
 
   @abc.abstractmethod
-  def observation_spec(self):
+  def observation_spec(self) -> types.NestedArraySpec:
     """Defines the observations provided by the environment.
 
     May use a subclass of `ArraySpec` that specifies additional properties such
@@ -98,7 +102,7 @@ class PyEnvironment(object):
     """
 
   @abc.abstractmethod
-  def action_spec(self):
+  def action_spec(self) -> types.NestedArraySpec:
     """Defines the actions that should be provided to `step()`.
 
     May use a subclass of `ArraySpec` that specifies additional properties such
@@ -108,7 +112,7 @@ class PyEnvironment(object):
       An `ArraySpec`, or a nested dict, list or tuple of `ArraySpec`s.
     """
 
-  def reward_spec(self):
+  def reward_spec(self) -> types.NestedArraySpec:
     """Defines the rewards that are returned by `step()`.
 
     Override this method to define an environment that uses non-standard reward
@@ -119,7 +123,19 @@ class PyEnvironment(object):
     """
     return array_spec.ArraySpec(shape=(), dtype=np.float32, name='reward')
 
-  def time_step_spec(self):
+  def discount_spec(self) -> types.NestedArraySpec:
+    """Defines the discount that are returned by `step()`.
+
+    Override this method to define an environment that uses non-standard
+    discount values, for example an environment with array-valued discounts.
+
+    Returns:
+      An `ArraySpec`, or a nested dict, list or tuple of `ArraySpec`s.
+    """
+    return array_spec.BoundedArraySpec(
+        shape=(), dtype=np.float32, minimum=0., maximum=1., name='discount')
+
+  def time_step_spec(self) -> ts.TimeStep:
     """Describes the `TimeStep` fields returned by `step()`.
 
     Override this method to define an environment that uses non-standard values
@@ -132,11 +148,11 @@ class PyEnvironment(object):
     """
     return ts.time_step_spec(self.observation_spec(), self.reward_spec())
 
-  def current_time_step(self):
+  def current_time_step(self) -> ts.TimeStep:
     """Returns the current timestep."""
     return self._current_time_step
 
-  def reset(self):
+  def reset(self) -> ts.TimeStep:
     """Starts a new sequence and returns the first `TimeStep` of this sequence.
 
     Note: Subclasses cannot override this directly. Subclasses implement
@@ -154,7 +170,7 @@ class PyEnvironment(object):
     self._current_time_step = self._reset()
     return self._current_time_step
 
-  def step(self, action):
+  def step(self, action: types.NestedArray) -> ts.TimeStep:
     """Updates the environment according to the action and returns a `TimeStep`.
 
     If the environment returned a `TimeStep` with `StepType.LAST` at the
@@ -187,7 +203,7 @@ class PyEnvironment(object):
     self._current_time_step = self._step(action)
     return self._current_time_step
 
-  def close(self):
+  def close(self) -> None:
     """Frees any resources used by the environment.
 
     Implement this method for an environment backed by an external process.
@@ -217,7 +233,7 @@ class PyEnvironment(object):
     """Allows the environment to be used in a with-statement context."""
     self.close()
 
-  def render(self, mode='rgb_array'):
+  def render(self, mode: Text = 'rgb_array') -> Optional[types.NestedArray]:
     """Renders the environment.
 
     Args:
@@ -234,7 +250,7 @@ class PyEnvironment(object):
     del mode  # unused
     raise NotImplementedError('No rendering support.')
 
-  def seed(self, seed):
+  def seed(self, seed: types.Seed) -> Any:
     """Seeds the environment.
 
     Args:
@@ -243,7 +259,7 @@ class PyEnvironment(object):
     del seed  # unused
     raise NotImplementedError('No seed support for this environment.')
 
-  def get_info(self):
+  def get_info(self) -> Any:
     """Returns the environment info returned on the last step.
 
     Returns:
@@ -254,7 +270,7 @@ class PyEnvironment(object):
     """
     raise NotImplementedError('No support of get_info for this environment.')
 
-  def get_state(self):
+  def get_state(self) -> Any:
     """Returns the `state` of the environment.
 
     The `state` contains everything required to restore the environment to the
@@ -267,13 +283,17 @@ class PyEnvironment(object):
     returned `state`. It should be treated as a token that can be passed back to
     `set_state()` later.
 
+    Note that the returned `state` handle should not be modified by the
+    environment later on, and ensuring this (e.g. using copy.deepcopy) is the
+    responsibility of the environment.
+
     Returns:
       state: The current state of the environment.
     """
     raise NotImplementedError('This environment has not implemented '
                               '`get_state()`.')
 
-  def set_state(self, state):
+  def set_state(self, state: Any) -> None:
     """Restores the environment to a given `state`.
 
     See definition of `state` in the documentation for get_state().
@@ -287,7 +307,7 @@ class PyEnvironment(object):
   #  These methods are to be implemented by subclasses:
 
   @abc.abstractmethod
-  def _step(self, action):
+  def _step(self, action: types.NestedArray) -> ts.TimeStep:
     """Updates the environment according to action and returns a `TimeStep`.
 
     See `step(self, action)` docstring for more details.
@@ -298,7 +318,7 @@ class PyEnvironment(object):
     """
 
   @abc.abstractmethod
-  def _reset(self):
+  def _reset(self) -> ts.TimeStep:
     """Starts a new sequence, returns the first `TimeStep` of this sequence.
 
     See `reset(self)` docstring for more details

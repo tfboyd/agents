@@ -31,6 +31,7 @@ from tf_agents.agents import tf_agent
 from tf_agents.bandits.agents import utils as bandit_utils
 from tf_agents.bandits.policies import linalg
 from tf_agents.bandits.policies import linear_bandit_policy as lin_policy
+from tf_agents.bandits.specs import utils as bandit_spec_utils
 from tf_agents.utils import common
 from tf_agents.utils import nest_utils
 
@@ -46,7 +47,7 @@ class LinearBanditVariableCollection(tf.Module):
 
   def __init__(self,
                context_dim,
-               num_actions,
+               num_models,
                use_eigendecomp=False,
                dtype=tf.float32,
                name=None):
@@ -57,12 +58,14 @@ class LinearBanditVariableCollection(tf.Module):
     Args:
       context_dim: (int) The context dimension of the bandit environment the
         agent will be used on.
-      num_actions: (int) The number of actions (arms).
+      num_models: (int) The number of models maintained by the agent. This is
+        either the same as the number of arms, or, if the agent accepts per-arm
+        features, 1.
       use_eigendecomp: (bool) Whether the agent uses eigen decomposition for
         maintaining its internal state.
       dtype: The type of the variables. Should be one of `tf.float32` and
         `tf.float64`.
-      name:  (string) the name of this instance.
+      name: (string) the name of this instance.
     """
     tf.Module.__init__(self, name=name)
     self.cov_matrix_list = []
@@ -70,7 +73,7 @@ class LinearBanditVariableCollection(tf.Module):
     self.eig_matrix_list = []
     self.eig_vals_list = []
     self.num_samples_list = []
-    for k in range(num_actions):
+    for k in range(num_models):
       self.cov_matrix_list.append(
           tf.compat.v2.Variable(
               tf.zeros([context_dim, context_dim], dtype=dtype),
@@ -148,6 +151,7 @@ class LinearBanditAgent(tf_agent.TFAgent):
                emit_policy_info=(),
                emit_log_probability=False,
                observation_and_action_constraint_splitter=None,
+               accepts_per_arm_features=False,
                debug_summaries=False,
                summarize_grads_and_vars=False,
                enable_summaries=True,
@@ -186,6 +190,8 @@ class LinearBanditAgent(tf_agent.TFAgent):
         policy, and 2) the boolean mask. This function should also work with a
         `TensorSpec` as input, and should output `TensorSpec` objects for the
         observation and mask.
+      accepts_per_arm_features: (bool) Whether the agent accepts per-arm
+        features.
       debug_summaries: A Python bool, default False. When True, debug summaries
         are gathered.
       summarize_grads_and_vars: A Python bool, default False. When True,
@@ -205,22 +211,31 @@ class LinearBanditAgent(tf_agent.TFAgent):
     common.tf_agents_gauge.get_cell('TFABandit').set(True)
     self._num_actions = bandit_utils.get_num_actions_from_tensor_spec(
         action_spec)
-    if observation_and_action_constraint_splitter is not None:
-      context_shape = observation_and_action_constraint_splitter(
-          time_step_spec.observation)[0].shape.as_list()
-    else:
-      context_shape = time_step_spec.observation.shape.as_list()
+    self._num_models = 1 if accepts_per_arm_features else self._num_actions
+    self._observation_and_action_constraint_splitter = (
+        observation_and_action_constraint_splitter)
+    self._time_step_spec = time_step_spec
+    self._accepts_per_arm_features = accepts_per_arm_features
     self._add_bias = add_bias
-    self._context_dim = (
-        tf.compat.dimension_value(context_shape[0]) if context_shape else 1)
+    if observation_and_action_constraint_splitter is not None:
+      context_spec, _ = observation_and_action_constraint_splitter(
+          time_step_spec.observation)
+    else:
+      context_spec = time_step_spec.observation
+
+    (self._global_context_dim,
+     self._arm_context_dim) = bandit_spec_utils.get_context_dims_from_spec(
+         context_spec, accepts_per_arm_features)
     if self._add_bias:
       # The bias is added via a constant 1 feature.
-      self._context_dim += 1
+      self._global_context_dim += 1
+    self._overall_context_dim = self._global_context_dim + self._arm_context_dim
+
     self._alpha = alpha
     if variable_collection is None:
       variable_collection = LinearBanditVariableCollection(
-          context_dim=self._context_dim,
-          num_actions=self._num_actions,
+          context_dim=self._overall_context_dim,
+          num_models=self._num_models,
           use_eigendecomp=use_eigendecomp,
           dtype=dtype)
     elif not isinstance(variable_collection, LinearBanditVariableCollection):
@@ -242,8 +257,6 @@ class LinearBanditAgent(tf_agent.TFAgent):
           'Agent dtype should be either `tf.float32 or `tf.float64`.')
     self._use_eigendecomp = use_eigendecomp
     self._tikhonov_weight = tikhonov_weight
-    self._observation_and_action_constraint_splitter = (
-        observation_and_action_constraint_splitter)
 
     if exploration_policy == ExplorationPolicy.linear_ucb_policy:
       exploration_strategy = lin_policy.ExplorationStrategy.optimistic
@@ -267,13 +280,19 @@ class LinearBanditAgent(tf_agent.TFAgent):
         add_bias=add_bias,
         emit_policy_info=emit_policy_info,
         emit_log_probability=emit_log_probability,
+        accepts_per_arm_features=accepts_per_arm_features,
         observation_and_action_constraint_splitter=(
             observation_and_action_constraint_splitter))
+    training_data_spec = None
+    if accepts_per_arm_features:
+      training_data_spec = bandit_spec_utils.drop_arm_observation(
+          policy.trajectory_spec, observation_and_action_constraint_splitter)
     super(LinearBanditAgent, self).__init__(
         time_step_spec=time_step_spec,
         action_spec=action_spec,
         policy=policy,
         collect_policy=policy,
+        training_data_spec=training_data_spec,
         debug_summaries=debug_summaries,
         summarize_grads_and_vars=summarize_grads_and_vars,
         enable_summaries=enable_summaries,
@@ -318,12 +337,12 @@ class LinearBanditAgent(tf_agent.TFAgent):
     It's equivalent to a stacking of theta vectors from the paper.
     """
     thetas = []
-    for k in range(self._num_actions):
+    for k in range(self._num_models):
       thetas.append(
           tf.squeeze(
               linalg.conjugate_gradient_solve(
                   self._cov_matrix_list[k] + self._tikhonov_weight *
-                  tf.eye(self._context_dim, dtype=self._dtype),
+                  tf.eye(self._overall_context_dim, dtype=self._dtype),
                   tf.expand_dims(self._data_vector_list[k], axis=-1)),
               axis=-1))
 
@@ -352,7 +371,7 @@ class LinearBanditAgent(tf_agent.TFAgent):
                 step=self.train_step_counter)
         if self._add_bias:
           thetas = self.theta
-          biases = thetas[:, -1]
+          biases = thetas[:, self._global_context_dim - 1]
           bias_list = tf.unstack(biases, axis=0)
           for i in range(self._num_actions):
             tf.compat.v2.summary.scalar(
@@ -360,29 +379,124 @@ class LinearBanditAgent(tf_agent.TFAgent):
                 data=bias_list[i],
                 step=self.train_step_counter)
 
-  def _distributed_train_step(self, experience, weights=None):
-    """Distributed train fn to be passed as input to run()."""
-    del weights  # unused
+  def _process_experience(self, experience):
+    """Given an experience, returns reward, action, observation, and batch size."""
+
+    if self._accepts_per_arm_features:
+      return self._process_experience_per_arm(experience)
+    else:
+      return self._process_experience_global(experience)
+
+  def _process_experience_per_arm(self, experience):
+    """Processes the experience in case the agent accepts per-arm features.
+
+    In the experience coming from the replay buffer, the reward (and all other
+    elements) have two batch dimensions `batch_size` and `time_steps`, where
+    `time_steps` is the number of driver steps executed in each training loop.
+    We flatten the tensors in order to reflect the effective batch size. Then,
+    all the necessary processing on the observation is done, including splitting
+    the action mask if it is present.
+
+    After the preprocessing, the per-arm part of the observation is copied over
+    from the respective policy info field and concatenated with the global
+    observation. The action tensor will be replaced by zeros, since in the
+    per-arm case, there is only one reward model to update.
+
+    Args:
+      experience: An instance of trajectory. Every element in the trajectory has
+      two batch dimensions.
+
+    Returns:
+      A tuple of reward, action, observation, and batch_size. All the outputs
+        (except `batch_size`) have a single batch dimension of value
+        `batch_size`.
+    """
     reward, _ = nest_utils.flatten_multi_batched_nested_tensors(
         experience.reward, self._time_step_spec.reward)
-    action, _ = nest_utils.flatten_multi_batched_nested_tensors(
-        experience.action, self._action_spec)
     observation, _ = nest_utils.flatten_multi_batched_nested_tensors(
-        experience.observation, self._time_step_spec.observation)
+        experience.observation, self.training_data_spec.observation)
 
     if self._observation_and_action_constraint_splitter is not None:
       observation, _ = self._observation_and_action_constraint_splitter(
           observation)
-    observation = tf.reshape(observation, [-1, self._context_dim])
-    observation = tf.cast(observation, self._dtype)
-    reward = tf.cast(reward, self._dtype)
-
-    # Increase the step counter.
     batch_size = tf.cast(
         tf.compat.dimension_value(tf.shape(reward)[0]), dtype=tf.int64)
+    global_observation = observation[bandit_spec_utils.GLOBAL_FEATURE_KEY]
+    if self._add_bias:
+      # The bias is added via a constant 1 feature.
+      global_observation = tf.concat(
+          [global_observation,
+           tf.ones([batch_size, 1], dtype=global_observation.dtype)],
+          axis=1)
+
+    # The arm observation we train on needs to be copied from the respective
+    # policy info field to the per arm observation field. Pretending there was
+    # only one action, we fill the action field with zeros.
+    action = tf.zeros(shape=[batch_size], dtype=tf.int64)
+    chosen_action, _ = nest_utils.flatten_multi_batched_nested_tensors(
+        experience.policy_info.chosen_arm_features,
+        self.policy.info_spec.chosen_arm_features)
+    arm_observation = chosen_action
+    overall_observation = tf.concat([global_observation, arm_observation],
+                                    axis=1)
+    overall_observation = tf.reshape(
+        tf.cast(overall_observation, self._dtype), [batch_size, -1])
+    reward = tf.cast(reward, self._dtype)
+
+    return reward, action, overall_observation, batch_size
+
+  def _process_experience_global(self, experience):
+    """Processes the experience in case the agent accepts only global features.
+
+    In the experience coming from the replay buffer, the reward (and all other
+    elements) have two batch dimensions `batch_size` and `time_steps`, where
+    `time_steps` is the number of driver steps executed in each training loop.
+    We flatten the tensors in order to reflect the effective batch size. Then,
+    all the necessary processing on the observation is done, including splitting
+    the action mask if it is present.
+
+    Args:
+      experience: An instance of trajectory. Every element in the trajectory has
+      two batch dimensions.
+
+    Returns:
+      A tuple of reward, action, observation, and batch_size. All the outputs
+        (except `batch_size`) have a single batch dimension of value
+        `batch_size`.
+    """
+    reward, _ = nest_utils.flatten_multi_batched_nested_tensors(
+        experience.reward, self._time_step_spec.reward)
+    observation, _ = nest_utils.flatten_multi_batched_nested_tensors(
+        experience.observation, self.training_data_spec.observation)
+    action, _ = nest_utils.flatten_multi_batched_nested_tensors(
+        experience.action, self._action_spec)
+    batch_size = tf.cast(
+        tf.compat.dimension_value(tf.shape(reward)[0]), dtype=tf.int64)
+
+    if self._observation_and_action_constraint_splitter is not None:
+      observation, _ = self._observation_and_action_constraint_splitter(
+          observation)
+    if self._add_bias:
+      # The bias is added via a constant 1 feature.
+      observation = tf.concat(
+          [observation,
+           tf.ones([batch_size, 1], dtype=observation.dtype)],
+          axis=1)
+
+    observation = tf.reshape(
+        tf.cast(observation, self._dtype), [batch_size, -1])
+    reward = tf.cast(reward, self._dtype)
+
+    return reward, action, observation, batch_size
+
+  def _distributed_train_step(self, experience, weights=None):
+    """Distributed train fn to be passed as input to run()."""
+    del weights  # unused
+    reward, action, observation, batch_size = self._process_experience(
+        experience)
     self._train_step_counter.assign_add(batch_size)
 
-    for k in range(self._num_actions):
+    for k in range(self._num_models):
       diag_mask = tf.linalg.tensor_diag(
           tf.cast(tf.equal(action, k), self._dtype))
       observations_for_arm = tf.matmul(diag_mask, observation)
@@ -398,33 +512,24 @@ class LinearBanditAgent(tf_agent.TFAgent):
                     per_replica_data_vector_update):
         """Merge the per-replica-updates."""
         # Reduce the per-replica-updates using SUM.
-        reduced_cov_matrix_updates = strategy.reduce(
-            tf.distribute.ReduceOp.SUM,
-            per_replica_cov_matrix_update, axis=None)
-        reduced_data_vector_updates = strategy.reduce(
-            tf.distribute.ReduceOp.SUM, per_replica_data_vector_update,
-            axis=None)
+        # pylint: disable=cell-var-from-loop
+        updates_and_vars = [
+            (per_replica_cov_matrix_update, self._cov_matrix_list[k]),
+            (per_replica_data_vector_update, self._data_vector_list[k])
+        ]
 
-        def update_fn(v, t):
-          v.assign(v + t)
-        def assign_fn(v, t):
-          v.assign(t)
+        reduced_updates = strategy.extended.batch_reduce_to(
+            tf.distribute.ReduceOp.SUM, updates_and_vars)
 
         # Update the model variables.
-        # pylint: disable=cell-var-from-loop
-        strategy.extended.update(
-            self._cov_matrix_list[k], update_fn,
-            args=(reduced_cov_matrix_updates,))
-        strategy.extended.update(
-            self._data_vector_list[k], update_fn,
-            args=(reduced_data_vector_updates,))
+        self._cov_matrix_list[k].assign_add(reduced_updates[0])
+        self._data_vector_list[k].assign_add(reduced_updates[1])
+
         # Compute the eigendecomposition, if needed.
         if self._use_eigendecomp:
           eig_vals, eig_matrix = tf.linalg.eigh(self._cov_matrix_list[k])
-          strategy.extended.update(
-              self._eig_vals_list[k], assign_fn, args=(eig_vals,))
-          strategy.extended.update(
-              self._eig_matrix_list[k], assign_fn, args=(eig_matrix,))
+          self._eig_vals_list[k].assign(eig_vals)
+          self._eig_matrix_list[k].assign(eig_matrix)
 
       # Passes the local_updates to the _merge_fn() above that performs custom
       # computation on the per-replica values.
@@ -435,7 +540,7 @@ class LinearBanditAgent(tf_agent.TFAgent):
           _merge_fn,
           args=(cov_matrix_local_udpate, data_vector_local_update))
 
-    loss = -1. * tf.reduce_sum(experience.reward)
+    loss = -1. * tf.reduce_sum(reward)
     return tf_agent.LossInfo(loss=(loss), extra=())
 
   def _train(self, experience, weights=None):
@@ -455,40 +560,15 @@ class LinearBanditAgent(tf_agent.TFAgent):
         have been calculated with the weights.  Note that each Agent chooses
         its own method of applying weights.
     """
-    strategy = tf.distribute.get_strategy()
-    if isinstance(strategy, tf.distribute.MirroredStrategy):
+    if tf.distribute.has_strategy():
       return self._distributed_train_step(experience)
 
     del weights  # unused
 
-    # If the experience comes from a replay buffer, the reward has shape:
-    #     [batch_size, time_steps]
-    # where `time_steps` is the number of driver steps executed in each
-    # training loop.
-    # We flatten the tensors below in order to reflect the effective batch size.
+    reward, action, observation, batch_size = self._process_experience(
+        experience)
 
-    reward, _ = nest_utils.flatten_multi_batched_nested_tensors(
-        experience.reward, self._time_step_spec.reward)
-    action, _ = nest_utils.flatten_multi_batched_nested_tensors(
-        experience.action, self._action_spec)
-    observation, _ = nest_utils.flatten_multi_batched_nested_tensors(
-        experience.observation, self._time_step_spec.observation)
-
-    if self._observation_and_action_constraint_splitter is not None:
-      observation, _ = self._observation_and_action_constraint_splitter(
-          observation)
-
-    batch_size = tf.cast(
-        tf.compat.dimension_value(tf.shape(reward)[0]), dtype=tf.int64)
-    observation = tf.cast(observation, self._dtype)
-    if self._add_bias:
-      # The bias is added via a constant 1 feature.
-      observation = tf.concat(
-          [observation, tf.ones([batch_size, 1], dtype=self._dtype)], axis=1)
-    observation = tf.reshape(observation, [-1, self._context_dim])
-    reward = tf.cast(reward, self._dtype)
-
-    for k in range(self._num_actions):
+    for k in range(self._num_models):
       diag_mask = tf.linalg.tensor_diag(
           tf.cast(tf.equal(action, k), self._dtype))
       observations_for_arm = tf.matmul(diag_mask, observation)
@@ -516,7 +596,7 @@ class LinearBanditAgent(tf_agent.TFAgent):
       tf.compat.v1.assign(self._eig_vals_list[k], eig_vals)
       tf.compat.v1.assign(self._eig_matrix_list[k], eig_matrix)
 
-    loss = -1. * tf.reduce_sum(experience.reward)
+    loss = -1. * tf.reduce_sum(reward)
     self.compute_summaries(loss)
 
     self._train_step_counter.assign_add(batch_size)
